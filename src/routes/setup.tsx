@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useFastLane } from "@/hooks/useFastLane";
 import { Card, Field, Input, Button, Address, Select } from "@/components/fastlane/Card";
-import { CheckCircle, Circle, KeyRound } from "lucide-react";
+import { CheckCircle, Circle, KeyRound, AlertTriangle, Plug, PlugZap } from "lucide-react";
 
 export const Route = createFileRoute("/setup")({ component: SetupPage });
 
@@ -17,7 +17,18 @@ const DEV_KEYS = [
 ];
 
 function SetupPage() {
-  const { api, accounts, selected, setSelected, getSigner } = useFastLane();
+  const { api, accounts, selected, setSelected, getSigner, connectWallet, extensionConnected } = useFastLane();
+  const [connectingExt, setConnectingExt] = useState(false);
+
+  const handleConnectExtension = async () => {
+    if (connectingExt) return;
+    setConnectingExt(true);
+    try {
+      await connectWallet();
+    } finally {
+      setConnectingExt(false);
+    }
+  };
   const [authorities, setAuthorities] = useState<string[]>([]);
   const [bonds, setBonds] = useState<Record<string, string>>({});
   const [threshold, setThreshold] = useState<string>("—");
@@ -110,20 +121,48 @@ function SetupPage() {
     } finally { setBusyT(false); }
   };
 
-  const insertKeys = async () => {
+  // Keys to insert = all DEV_KEYS that have a matching extension account address,
+  // OR all DEV_KEYS if no extension accounts are connected yet.
+  const keysToInsert = (() => {
+    const extAddresses = new Set(accounts.map((a) => a.address));
+    const matched = DEV_KEYS.filter((k) => {
+      const acc = accounts.find((a) => a.name === k.name);
+      return acc && extAddresses.has(acc.address);
+    });
+    // If extension is connected and matched at least one, only insert matched ones
+    // Otherwise insert all (fallback for dev-only mode)
+    return matched.length > 0 ? matched : DEV_KEYS;
+  })();
+
+  const insertKeys = async (keys = keysToInsert) => {
     if (!api) return;
     setBusyKeys(true);
     setKeyStatus({});
-    for (const k of DEV_KEYS) {
+    let ok = 0;
+    for (const k of keys) {
       try {
         await (api.rpc as any).author.insertKey("fast", k.suri, k.pub);
         setKeyStatus((s) => ({ ...s, [k.name]: "ok" }));
+        ok++;
       } catch {
         setKeyStatus((s) => ({ ...s, [k.name]: "err" }));
       }
     }
     setBusyKeys(false);
-    toast.success("All dev keys inserted into node keystore");
+    toast.success(`${ok} key${ok === 1 ? "" : "s"} inserted into node keystore`);
+  };
+
+  const insertSingle = async (k: typeof DEV_KEYS[number]) => {
+    if (!api) return;
+    setKeyStatus((s) => ({ ...s, [k.name]: "idle" }));
+    try {
+      await (api.rpc as any).author.insertKey("fast", k.suri, k.pub);
+      setKeyStatus((s) => ({ ...s, [k.name]: "ok" }));
+      toast.success(`${k.name} key inserted`);
+    } catch (e: any) {
+      setKeyStatus((s) => ({ ...s, [k.name]: "err" }));
+      toast.error(e?.message ?? `Failed to insert ${k.name}`);
+    }
   };
 
   return (
@@ -134,7 +173,29 @@ function SetupPage() {
       </div>
 
       {/* Signing account */}
-      <Card title="Signing Account" subtitle="Must be the sudo key (Alice) for set_authorities and set_threshold">
+      <Card
+        title="Signing Account"
+        subtitle="Must be the sudo key (Alice) for set_authorities and set_threshold"
+        action={
+          <Button
+            onClick={handleConnectExtension}
+            loading={connectingExt}
+            disabled={extensionConnected && !connectingExt}
+          >
+            {extensionConnected ? (
+              <>
+                <PlugZap className="h-3.5 w-3.5" />
+                Extension Connected
+              </>
+            ) : (
+              <>
+                <Plug className="h-3.5 w-3.5" />
+                Connect Polkadot.js Extension
+              </>
+            )}
+          </Button>
+        }
+      >
         <Field label="Account">
           <Select value={selected} onChange={(e) => setSelected(e.target.value)}>
             {accounts.map((a) => (
@@ -147,36 +208,141 @@ function SetupPage() {
         {selected && (
           <p className="mt-2 font-mono text-[11px] text-muted-foreground break-all">{selected}</p>
         )}
+        {!extensionConnected && (
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            Click <strong>Connect Polkadot.js Extension</strong> to authorize this site and load your browser-wallet accounts. Dev accounts (Alice, Bob, …) are always available.
+          </p>
+        )}
       </Card>
 
       {/* Insert node keys */}
       <Card
         title="Insert Node Keys"
-        subtitle="author_insertKey — loads dev keys into the node keystore for the OCW to sign"
+        subtitle="author_insertKey — inserts dev keys into the node keystore so the OCW can auto-sign attestations"
         action={
-          <Button onClick={insertKeys} loading={busyKeys} disabled={!api}>
-            <KeyRound className="h-3.5 w-3.5" /> Insert All Keys
+          <Button onClick={() => insertKeys()} loading={busyKeys} disabled={!api}>
+            <KeyRound className="h-3.5 w-3.5" />
+            {keysToInsert.length < DEV_KEYS.length
+              ? `Insert ${keysToInsert.length} Extension Key${keysToInsert.length === 1 ? "" : "s"}`
+              : "Insert All Keys"}
           </Button>
         }
       >
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        {/* Explanation banner */}
+        <div className="mb-3 rounded-lg border border-info/30 bg-info/10 px-3 py-2 text-[11px] text-info">
+          <strong>How it works:</strong> The Polkadot.js extension is for <em>signing transactions</em> from the browser.
+          The node keystore is separate — it holds keys the <em>off-chain worker (OCW)</em> uses to auto-sign attestations on-chain.
+          Both must have the same accounts for the full flow to work.
+        </div>
+
+        <div className="space-y-1.5">
           {DEV_KEYS.map((k) => {
             const st = keyStatus[k.name];
+            const match = accounts.find((a) => a.name === k.name);
+            // Check if extension also has this account (same address)
+            const inExtension = match && accounts.some(
+              (a) => a.address === match.address && a.name === k.name
+            );
             return (
-              <div key={k.name} className="flex items-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-2 text-xs">
+              <div
+                key={k.name}
+                className={`flex items-center gap-3 rounded-lg border px-3 py-2 text-xs transition-colors ${
+                  st === "ok"
+                    ? "border-success/40 bg-success/10"
+                    : st === "err"
+                    ? "border-destructive/40 bg-destructive/10"
+                    : "border-border bg-background/40"
+                }`}
+              >
                 {st === "ok"
-                  ? <CheckCircle className="h-3.5 w-3.5 shrink-0 text-success" />
+                  ? <CheckCircle className="h-4 w-4 shrink-0 text-success" />
                   : st === "err"
-                  ? <Circle className="h-3.5 w-3.5 shrink-0 text-destructive" />
-                  : <Circle className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
-                <span className="font-medium">{k.name}</span>
-                <span className="truncate font-mono text-[10px] text-muted-foreground">{k.suri}</span>
+                  ? <Circle className="h-4 w-4 shrink-0 text-destructive" />
+                  : <Circle className="h-4 w-4 shrink-0 text-muted-foreground" />}
+
+                <div className="w-20 shrink-0">
+                  <div className="font-semibold">{k.name}</div>
+                  <div className="font-mono text-[10px] text-muted-foreground">{k.suri}</div>
+                </div>
+
+                {match && (
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className="text-[10px] text-muted-foreground">Address</span>
+                      {inExtension && (
+                        <span className="rounded-full bg-success/15 px-1.5 text-[9px] font-semibold text-success">
+                          ✓ in extension
+                        </span>
+                      )}
+                    </div>
+                    <div className="font-mono text-[10px] truncate text-foreground/70">{match.address}</div>
+                  </div>
+                )}
+
+                {st === "ok" ? (
+                  <span className="shrink-0 rounded-full border border-success/40 px-2 py-0.5 text-[10px] font-semibold text-success">
+                    Inserted ✓
+                  </span>
+                ) : st === "err" ? (
+                  <button
+                    onClick={() => insertSingle(k)}
+                    className="shrink-0 rounded-full border border-destructive/40 px-2 py-0.5 text-[10px] font-semibold text-destructive hover:bg-destructive/10"
+                  >
+                    Retry ↺
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => insertSingle(k)}
+                    className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[10px] font-semibold text-muted-foreground hover:border-primary hover:text-primary"
+                  >
+                    Insert
+                  </button>
+                )}
               </div>
             );
           })}
+
+          {/* Extension accounts that DON'T match any standard dev key */}
+          {(() => {
+            const devAddresses = new Set(
+              DEV_KEYS.map((k) => accounts.find((a) => a.name === k.name)?.address).filter(Boolean)
+            );
+            const mismatchedExtAccounts = accounts.filter(
+              (a) => !devAddresses.has(a.address) && a.name
+            );
+            if (mismatchedExtAccounts.length === 0) return null;
+            return (
+              <div className="mt-3 space-y-1.5">
+                <p className="text-[11px] font-semibold text-warning">
+                  Extension accounts with non-standard addresses — cannot be auto-inserted:
+                </p>
+                {mismatchedExtAccounts.map((a) => (
+                  <div key={a.address} className="flex items-center gap-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
+                    <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />
+                    <div className="w-20 shrink-0">
+                      <div className="font-semibold">{a.name}</div>
+                      <div className="text-[10px] text-warning/70">not a dev account</div>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[10px] text-muted-foreground mb-0.5">Address (does not match standard seed)</div>
+                      <div className="font-mono text-[10px] truncate text-foreground/70">{a.address}</div>
+                    </div>
+                    <span className="shrink-0 rounded-full border border-warning/40 px-2 py-0.5 text-[10px] font-semibold text-warning">
+                      Cannot Insert
+                    </span>
+                  </div>
+                ))}
+                <p className="text-[11px] text-muted-foreground">
+                  These accounts were imported with a different seed. Re-import using the raw seeds from the table above, or only use Alice + Bob as authorities.
+                </p>
+              </div>
+            );
+          })()}
         </div>
+
         <p className="mt-3 text-[11px] text-muted-foreground">
-          This replaces the curl commands. Keys are stored in the node's local keystore and used by the off-chain worker to auto-sign attestations.
+          Requires node started with <code className="rounded bg-background/60 px-1">--rpc-methods=Unsafe</code>.
+          Equivalent to the <code className="rounded bg-background/60 px-1">curl author_insertKey</code> commands.
         </p>
       </Card>
 

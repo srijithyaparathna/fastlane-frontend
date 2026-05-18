@@ -77,12 +77,14 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     (async () => {
+      // 1. Load dev accounts from keyring
+      let devAccounts: WalletAccount[] = [];
       try {
         const { Keyring } = await import("@polkadot/keyring");
         const { cryptoWaitReady } = await import("@polkadot/util-crypto");
         await cryptoWaitReady();
         const keyring = new Keyring({ type: "sr25519" });
-        const devAccounts: WalletAccount[] = DEV_SEEDS.map(({ name, uri }) => {
+        devAccounts = DEV_SEEDS.map(({ name, uri }) => {
           const pair = keyring.addFromUri(uri);
           keypairsRef.current.set(pair.address, pair);
           return { address: pair.address, name };
@@ -91,6 +93,48 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
         setSelected(devAccounts[0].address);
       } catch (e) {
         console.error("Failed to load dev accounts", e);
+      }
+
+      // 2. Enable extension silently, then subscribe to account changes
+      try {
+        const { web3Enable, web3AccountsSubscribe } = await import("@polkadot/extension-dapp");
+        const extensions = await web3Enable("FastLane Dashboard");
+        if (extensions.length === 0) return;
+
+        let previousAddresses: Set<string> = new Set(devAccounts.map((a) => a.address));
+        let firstRun = true;
+
+        // Fires immediately with current accounts, then again on every change
+        await web3AccountsSubscribe((injectedAccounts) => {
+          const extList: WalletAccount[] = injectedAccounts.map((a) => ({
+            address: a.address,
+            name: a.meta.name,
+          }));
+
+          setAccounts((prev) => {
+            const existing = new Set(prev.map((a) => a.address));
+            const extras = extList.filter((a) => !existing.has(a.address));
+            return extras.length > 0 ? [...prev, ...extras] : prev;
+          });
+
+          // Show toast only when new accounts appear (not on first silent load)
+          const newAddresses = new Set(extList.map((a) => a.address));
+          const added = extList.filter((a) => !previousAddresses.has(a.address));
+          previousAddresses = new Set([...previousAddresses, ...newAddresses]);
+
+          if (!firstRun && added.length > 0) {
+            toast.success(
+              `Extension connected — ${added.map((a) => a.name ?? a.address.slice(0, 8)).join(", ")} added`
+            );
+          }
+          if (extList.length > 0) {
+            setExtensionConnected(true);
+            extensionInitiated.current = true;
+          }
+          firstRun = false;
+        });
+      } catch {
+        // Extension not available — dev accounts still work
       }
     })();
   }, []);
@@ -190,13 +234,12 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
   }, [parseBlock, addEvents]);
 
   const connectWallet = async () => {
-    if (extensionInitiated.current) return;
+    // Allow re-triggering even if auto-connect already ran, to pick up newly authorized accounts
     extensionInitiated.current = true;
     try {
       const { web3Enable, web3Accounts } = await import("@polkadot/extension-dapp");
       const ext = await web3Enable("FastLane Dashboard");
       if (ext.length === 0) {
-        extensionInitiated.current = false;
         toast.error("No Polkadot.js extension found. Install it from the Chrome Web Store.");
         return;
       }
@@ -204,12 +247,12 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
       const extList = all.map((a) => ({ address: a.address, name: a.meta.name }));
       setAccounts((prev) => {
         const existing = new Set(prev.map((a) => a.address));
-        return [...prev, ...extList.filter((a) => !existing.has(a.address))];
+        const extras = extList.filter((a) => !existing.has(a.address));
+        return extras.length > 0 ? [...prev, ...extras] : prev;
       });
       setExtensionConnected(true);
-      toast.success(`Polkadot.js extension connected — ${extList.length} account(s) added`);
+      toast.success(`Extension connected — ${extList.length} account(s) available`);
     } catch (e: any) {
-      extensionInitiated.current = false;
       toast.error(e?.message ?? "Failed to connect extension");
     }
   };
