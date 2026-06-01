@@ -1,14 +1,21 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useFastLane } from "@/hooks/useFastLane";
-import { Card, Field, Input, Button, CopyButton } from "@/components/fastlane/Card";
+import { Card, Field, Input, Button, CopyButton, Select } from "@/components/fastlane/Card";
 import { randomHash } from "@/lib/fastlane";
+import { Plug, PlugZap } from "lucide-react";
 
 export const Route = createFileRoute("/submit")({ component: SubmitPage });
 
 function SubmitPage() {
-  const { api, selected, accounts, getSigner } = useFastLane();
+  const { api, accounts, getSigner, connectWallet, extensionConnected, extAddresses } = useFastLane();
+  const extAccounts = useMemo(
+    () => accounts.filter((a) => extAddresses.has(a.address)),
+    [accounts, extAddresses],
+  );
+  const [signerAddress, setSignerAddress] = useState("");
+  const [connecting, setConnecting] = useState(false);
   const [nonce, setNonce] = useState("0");
   const [expiry, setExpiry] = useState("9999");
   const [domain, setDomain] = useState("1");
@@ -16,23 +23,48 @@ function SubmitPage() {
   const [busy, setBusy] = useState(false);
   const [payloadId, setPayloadId] = useState<string | null>(null);
 
+  // Keep the selected signer pointed at a valid extension account
   useEffect(() => {
-    if (!api || !selected) return;
+    if (extAccounts.length === 0) {
+      setSignerAddress("");
+      return;
+    }
+    if (!extAccounts.some((a) => a.address === signerAddress)) {
+      setSignerAddress(extAccounts[0].address);
+    }
+  }, [extAccounts, signerAddress]);
+
+  const handleConnect = async () => {
+    if (connecting) return;
+    setConnecting(true);
+    try {
+      await connectWallet();
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!api || !signerAddress) return;
     (async () => {
       try {
         const p = (api.query as any).fastlane;
         if (p?.nonces) {
-          const n = await p.nonces(selected);
+          const n = await p.nonces(signerAddress);
           setNonce(n?.toString?.() ?? "0");
         }
       } catch {}
     })();
-  }, [api, selected]);
+  }, [api, signerAddress]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!api || !selected) {
-      toast.error("Connect wallet first");
+    if (!api) {
+      toast.error("Still connecting to the chain — try again in a moment");
+      return;
+    }
+    if (!extensionConnected || !signerAddress) {
+      toast.error("Connect the Polkadot.js extension and select an account to sign with");
       return;
     }
     if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) {
@@ -42,7 +74,12 @@ function SubmitPage() {
     setBusy(true);
     setPayloadId(null);
     try {
-      const signer = await getSigner(selected);
+      const signer = await getSigner(signerAddress);
+      // Payloads must always be signed through the Polkadot.js extension (password-protected),
+      // never with an in-app dev keypair.
+      if (signer.type !== "extension") {
+        throw new Error("Payloads must be signed with a Polkadot.js extension account");
+      }
       const tx = (api.tx as any).fastlane.submit(Number(nonce), Number(expiry), Number(domain), hash);
       await new Promise<void>((resolve, reject) => {
         const cb = (r: any) => {
@@ -57,10 +94,7 @@ function SubmitPage() {
             resolve();
           }
         };
-        const send = signer.type === "keypair"
-          ? tx.signAndSend(signer.pair, cb)
-          : tx.signAndSend(selected, { signer: signer.injector.signer }, cb);
-        send.catch(reject);
+        tx.signAndSend(signerAddress, { signer: signer.injector.signer }, cb).catch(reject);
       });
     } catch (e: any) {
       toast.error(e?.message ?? "Failed");
@@ -69,6 +103,8 @@ function SubmitPage() {
     }
   };
 
+  const canSubmit = extensionConnected && !!signerAddress;
+
   return (
     <div className="space-y-6">
       <div>
@@ -76,7 +112,48 @@ function SubmitPage() {
         <p className="text-sm text-muted-foreground">Sign and broadcast a fastlane.submit() extrinsic.</p>
       </div>
 
-      <Card title="Payload Details" subtitle={selected ? `Signing as ${selected.slice(0, 10)}…` : "Connect wallet to sign"}>
+      {/* Signing account — extension only */}
+      <Card
+        title="Signing Account"
+        subtitle="Payloads must be signed through the Polkadot.js extension"
+        action={
+          <Button onClick={handleConnect} loading={connecting}>
+            {extensionConnected ? (
+              <>
+                <PlugZap className="h-3.5 w-3.5" />
+                Reconnect Extension
+              </>
+            ) : (
+              <>
+                <Plug className="h-3.5 w-3.5" />
+                Connect Polkadot.js Extension
+              </>
+            )}
+          </Button>
+        }
+      >
+        {extAccounts.length > 0 ? (
+          <Field label="Extension account">
+            <Select value={signerAddress} onChange={(e) => setSignerAddress(e.target.value)}>
+              {extAccounts.map((a) => (
+                <option key={a.address} value={a.address}>
+                  {a.name ?? "Account"} — {a.address.slice(0, 16)}…
+                </option>
+              ))}
+            </Select>
+          </Field>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            No extension accounts available. Click <strong>Connect Polkadot.js Extension</strong> and
+            authorize this site. You will be prompted for your extension password when signing.
+          </p>
+        )}
+        {signerAddress && (
+          <p className="mt-2 font-mono text-[11px] text-muted-foreground break-all">{signerAddress}</p>
+        )}
+      </Card>
+
+      <Card title="Payload Details" subtitle={signerAddress ? `Signing as ${signerAddress.slice(0, 10)}…` : "Connect the extension to sign"}>
         <form onSubmit={submit} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <Field label="Nonce (auto)"><Input value={nonce} readOnly /></Field>
@@ -90,7 +167,7 @@ function SubmitPage() {
             </div>
           </Field>
           <div className="flex justify-end">
-            <Button type="submit" loading={busy} disabled={!selected || accounts.length === 0}>Submit Payload</Button>
+            <Button type="submit" loading={busy} disabled={!canSubmit}>Submit Payload</Button>
           </div>
         </form>
 

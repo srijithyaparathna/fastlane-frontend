@@ -5,7 +5,7 @@ import { getApi } from "@/lib/fastlane";
 import { toast } from "sonner";
 
 export type ConnState = "connecting" | "connected" | "disconnected";
-export type WalletAccount = { address: string; name?: string };
+export type WalletAccount = { address: string; name?: string; source: "dev" | "extension" };
 export type FLEvent = {
   id: string;
   block: number;
@@ -50,6 +50,8 @@ type Ctx = {
   accounts: WalletAccount[];
   selected: string;
   extensionConnected: boolean;
+  /** Addresses the Polkadot.js extension can sign for (may overlap dev account addresses) */
+  extAddresses: Set<string>;
   setSelected: (a: string) => void;
   connectWallet: () => Promise<void>;
   getSigner: (address: string) => Promise<
@@ -70,10 +72,20 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
   const [accounts, setAccounts] = useState<WalletAccount[]>([]);
   const [selected, setSelected] = useState("");
   const [extensionConnected, setExtensionConnected] = useState(false);
+  const [extAddresses, setExtAddresses] = useState<Set<string>>(new Set());
   const [events, setEvents] = useState<FLEvent[]>([]);
   const keypairsRef = useRef<Map<string, KeyringPair>>(new Map());
+  const extAddressesRef = useRef<Set<string>>(new Set());
   const extensionInitiated = useRef(false);
   const seenIds = useRef<Set<string>>(new Set());
+
+  // Record which addresses the extension can sign for, so getSigner can prefer it
+  const markExtAddresses = useCallback((addrs: string[]) => {
+    const next = new Set(extAddressesRef.current);
+    addrs.forEach((a) => next.add(a));
+    extAddressesRef.current = next;
+    setExtAddresses(next);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -87,7 +99,7 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
         devAccounts = DEV_SEEDS.map(({ name, uri }) => {
           const pair = keyring.addFromUri(uri);
           keypairsRef.current.set(pair.address, pair);
-          return { address: pair.address, name };
+          return { address: pair.address, name, source: "dev" as const };
         });
         setAccounts(devAccounts);
         setSelected(devAccounts[0].address);
@@ -109,6 +121,7 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
           const extList: WalletAccount[] = injectedAccounts.map((a) => ({
             address: a.address,
             name: a.meta.name,
+            source: "extension" as const,
           }));
 
           setAccounts((prev) => {
@@ -128,6 +141,7 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
             );
           }
           if (extList.length > 0) {
+            markExtAddresses(extList.map((a) => a.address));
             setExtensionConnected(true);
             extensionInitiated.current = true;
           }
@@ -244,12 +258,13 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
         return;
       }
       const all = await web3Accounts();
-      const extList = all.map((a) => ({ address: a.address, name: a.meta.name }));
+      const extList: WalletAccount[] = all.map((a) => ({ address: a.address, name: a.meta.name, source: "extension" as const }));
       setAccounts((prev) => {
         const existing = new Set(prev.map((a) => a.address));
         const extras = extList.filter((a) => !existing.has(a.address));
         return extras.length > 0 ? [...prev, ...extras] : prev;
       });
+      markExtAddresses(extList.map((a) => a.address));
       setExtensionConnected(true);
       toast.success(`Extension connected — ${extList.length} account(s) available`);
     } catch (e: any) {
@@ -261,6 +276,13 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
     | { type: "keypair"; pair: KeyringPair }
     | { type: "extension"; injector: any }
   > => {
+    // Prefer the extension whenever it can sign for this address — even if a dev
+    // keypair with the same address exists — so signing goes through the password prompt.
+    if (extAddressesRef.current.has(address)) {
+      const { web3FromAddress } = await import("@polkadot/extension-dapp");
+      const injector = await web3FromAddress(address);
+      return { type: "extension", injector };
+    }
     const pair = keypairsRef.current.get(address);
     if (pair) return { type: "keypair", pair };
     const { web3FromAddress } = await import("@polkadot/extension-dapp");
@@ -275,7 +297,7 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
 
   return (
     <FastLaneCtx.Provider value={{
-      api, state, block, chain, accounts, selected, extensionConnected,
+      api, state, block, chain, accounts, selected, extensionConnected, extAddresses,
       setSelected, connectWallet, getSigner, events, clearEvents,
     }}>
       {children}
