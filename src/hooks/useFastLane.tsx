@@ -52,6 +52,11 @@ type Ctx = {
   extensionConnected: boolean;
   /** Addresses the Polkadot.js extension can sign for (may overlap dev account addresses) */
   extAddresses: Set<string>;
+  /** The extension account the user has explicitly logged in as (required to submit payloads) */
+  loggedIn: WalletAccount | null;
+  /** Opens the Polkadot.js extension and asks the user to sign a sign-in message with their password */
+  login: (address: string) => Promise<boolean>;
+  logout: () => void;
   setSelected: (a: string) => void;
   connectWallet: () => Promise<void>;
   getSigner: (address: string) => Promise<
@@ -61,6 +66,8 @@ type Ctx = {
   events: FLEvent[];
   clearEvents: () => void;
 };
+
+const LOGIN_STORAGE_KEY = "fastlane.loggedInAddress";
 
 const FastLaneCtx = createContext<Ctx | null>(null);
 
@@ -73,6 +80,7 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
   const [selected, setSelected] = useState("");
   const [extensionConnected, setExtensionConnected] = useState(false);
   const [extAddresses, setExtAddresses] = useState<Set<string>>(new Set());
+  const [loggedInAddress, setLoggedInAddress] = useState<string | null>(null);
   const [events, setEvents] = useState<FLEvent[]>([]);
   const keypairsRef = useRef<Map<string, KeyringPair>>(new Map());
   const extAddressesRef = useRef<Set<string>>(new Set());
@@ -85,6 +93,52 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
     addrs.forEach((a) => next.add(a));
     extAddressesRef.current = next;
     setExtAddresses(next);
+  }, []);
+
+  // Restore a previous login from this browser session
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(LOGIN_STORAGE_KEY);
+      if (stored) setLoggedInAddress(stored);
+    } catch {}
+  }, []);
+
+  // Once the extension reports its accounts, drop a stale login that no longer matches
+  useEffect(() => {
+    if (!extensionConnected || extAddresses.size === 0 || !loggedInAddress) return;
+    if (!extAddresses.has(loggedInAddress)) {
+      setLoggedInAddress(null);
+      try { window.localStorage.removeItem(LOGIN_STORAGE_KEY); } catch {}
+    }
+  }, [extensionConnected, extAddresses, loggedInAddress]);
+
+  const login = useCallback(async (address: string): Promise<boolean> => {
+    if (!extAddressesRef.current.has(address)) {
+      toast.error("That account isn't available in the Polkadot.js extension");
+      return false;
+    }
+    try {
+      const { web3FromAddress } = await import("@polkadot/extension-dapp");
+      const { stringToHex } = await import("@polkadot/util");
+      const injector = await web3FromAddress(address);
+      if (!injector.signer?.signRaw) {
+        throw new Error("This extension account can't sign messages");
+      }
+      // Opens the Polkadot.js extension popup and requires the user's password to approve.
+      const message = `Sign in to FastLane Dashboard\naddress: ${address}\nat: ${new Date().toISOString()}`;
+      await injector.signer.signRaw({ address, type: "bytes", data: stringToHex(message) });
+    } catch (e: any) {
+      toast.error(e?.message ?? "Login was cancelled in the extension");
+      return false;
+    }
+    setLoggedInAddress(address);
+    try { window.localStorage.setItem(LOGIN_STORAGE_KEY, address); } catch {}
+    return true;
+  }, []);
+
+  const logout = useCallback(() => {
+    setLoggedInAddress(null);
+    try { window.localStorage.removeItem(LOGIN_STORAGE_KEY); } catch {}
   }, []);
 
   useEffect(() => {
@@ -295,9 +349,14 @@ export function FastLaneProvider({ children }: { children: ReactNode }) {
     setEvents([]);
   }, []);
 
+  const loggedIn = loggedInAddress
+    ? accounts.find((a) => a.address === loggedInAddress) ?? { address: loggedInAddress, source: "extension" as const }
+    : null;
+
   return (
     <FastLaneCtx.Provider value={{
       api, state, block, chain, accounts, selected, extensionConnected, extAddresses,
+      loggedIn, login, logout,
       setSelected, connectWallet, getSigner, events, clearEvents,
     }}>
       {children}
