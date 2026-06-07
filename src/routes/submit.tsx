@@ -1,21 +1,15 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useFastLane } from "@/hooks/useFastLane";
-import { Card, Field, Input, Button, CopyButton, Select } from "@/components/fastlane/Card";
+import { Card, Field, Input, Button, CopyButton, Address } from "@/components/fastlane/Card";
 import { randomHash } from "@/lib/fastlane";
-import { Plug, PlugZap } from "lucide-react";
+import { LogIn, ShieldCheck } from "lucide-react";
 
 export const Route = createFileRoute("/submit")({ component: SubmitPage });
 
 function SubmitPage() {
-  const { api, accounts, getSigner, connectWallet, extensionConnected, extAddresses } = useFastLane();
-  const extAccounts = useMemo(
-    () => accounts.filter((a) => extAddresses.has(a.address)),
-    [accounts, extAddresses],
-  );
-  const [signerAddress, setSignerAddress] = useState("");
-  const [connecting, setConnecting] = useState(false);
+  const { api, loggedIn, getSigner } = useFastLane();
   const [nonce, setNonce] = useState("0");
   const [expiry, setExpiry] = useState("9999");
   const [domain, setDomain] = useState("1");
@@ -23,26 +17,7 @@ function SubmitPage() {
   const [busy, setBusy] = useState(false);
   const [payloadId, setPayloadId] = useState<string | null>(null);
 
-  // Keep the selected signer pointed at a valid extension account
-  useEffect(() => {
-    if (extAccounts.length === 0) {
-      setSignerAddress("");
-      return;
-    }
-    if (!extAccounts.some((a) => a.address === signerAddress)) {
-      setSignerAddress(extAccounts[0].address);
-    }
-  }, [extAccounts, signerAddress]);
-
-  const handleConnect = async () => {
-    if (connecting) return;
-    setConnecting(true);
-    try {
-      await connectWallet();
-    } finally {
-      setConnecting(false);
-    }
-  };
+  const signerAddress = loggedIn?.address ?? "";
 
   useEffect(() => {
     if (!api || !signerAddress) return;
@@ -63,8 +38,8 @@ function SubmitPage() {
       toast.error("Still connecting to the chain — try again in a moment");
       return;
     }
-    if (!extensionConnected || !signerAddress) {
-      toast.error("Connect the Polkadot.js extension and select an account to sign with");
+    if (!loggedIn) {
+      toast.error("Log in with the Polkadot.js extension first");
       return;
     }
     if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) {
@@ -74,7 +49,7 @@ function SubmitPage() {
     setBusy(true);
     setPayloadId(null);
     try {
-      const signer = await getSigner(signerAddress);
+      const signer = await getSigner(loggedIn.address);
       // Payloads must always be signed through the Polkadot.js extension (password-protected),
       // never with an in-app dev keypair.
       if (signer.type !== "extension") {
@@ -94,7 +69,7 @@ function SubmitPage() {
             resolve();
           }
         };
-        tx.signAndSend(signerAddress, { signer: signer.injector.signer }, cb).catch(reject);
+        tx.signAndSend(loggedIn.address, { signer: signer.injector.signer }, cb).catch(reject);
       });
     } catch (e: any) {
       toast.error(e?.message ?? "Failed");
@@ -103,7 +78,29 @@ function SubmitPage() {
     }
   };
 
-  const canSubmit = extensionConnected && !!signerAddress;
+  if (!loggedIn) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold">Submit Payload</h1>
+          <p className="text-sm text-muted-foreground">Sign and broadcast a fastlane.submit() extrinsic.</p>
+        </div>
+        <Card title="Login required" subtitle="You must log in with a Polkadot.js extension account to submit payloads">
+          <p className="mb-4 text-sm text-muted-foreground">
+            Submitting a payload signs an extrinsic on-chain, so this app requires you to log in with an
+            account from your Polkadot.js browser extension first. You'll be asked for your extension
+            password at the moment of signing.
+          </p>
+          <Link to="/login">
+            <Button>
+              <LogIn className="h-3.5 w-3.5" />
+              Go to Login
+            </Button>
+          </Link>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -112,48 +109,22 @@ function SubmitPage() {
         <p className="text-sm text-muted-foreground">Sign and broadcast a fastlane.submit() extrinsic.</p>
       </div>
 
-      {/* Signing account — extension only */}
-      <Card
-        title="Signing Account"
-        subtitle="Payloads must be signed through the Polkadot.js extension"
-        action={
-          <Button onClick={handleConnect} loading={connecting}>
-            {extensionConnected ? (
-              <>
-                <PlugZap className="h-3.5 w-3.5" />
-                Reconnect Extension
-              </>
-            ) : (
-              <>
-                <Plug className="h-3.5 w-3.5" />
-                Connect Polkadot.js Extension
-              </>
-            )}
-          </Button>
-        }
-      >
-        {extAccounts.length > 0 ? (
-          <Field label="Extension account">
-            <Select value={signerAddress} onChange={(e) => setSignerAddress(e.target.value)}>
-              {extAccounts.map((a) => (
-                <option key={a.address} value={a.address}>
-                  {a.name ?? "Account"} — {a.address.slice(0, 16)}…
-                </option>
-              ))}
-            </Select>
-          </Field>
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            No extension accounts available. Click <strong>Connect Polkadot.js Extension</strong> and
-            authorize this site. You will be prompted for your extension password when signing.
-          </p>
-        )}
-        {signerAddress && (
-          <p className="mt-2 font-mono text-[11px] text-muted-foreground break-all">{signerAddress}</p>
-        )}
+      <Card title="Signed in as" subtitle="Switch accounts from the Login page">
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-success/40 bg-success/10 px-4 py-3">
+          <div className="flex items-center gap-3">
+            <ShieldCheck className="h-5 w-5 text-success" />
+            <div>
+              <div className="text-sm font-semibold">{loggedIn.name ?? "Account"}</div>
+              <Address value={loggedIn.address} />
+            </div>
+          </div>
+          <Link to="/login" className="text-xs font-medium text-primary hover:underline">
+            Switch account
+          </Link>
+        </div>
       </Card>
 
-      <Card title="Payload Details" subtitle={signerAddress ? `Signing as ${signerAddress.slice(0, 10)}…` : "Connect the extension to sign"}>
+      <Card title="Payload Details" subtitle={`Signing as ${loggedIn.address.slice(0, 10)}…`}>
         <form onSubmit={submit} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <Field label="Nonce (auto)"><Input value={nonce} readOnly /></Field>
@@ -167,7 +138,7 @@ function SubmitPage() {
             </div>
           </Field>
           <div className="flex justify-end">
-            <Button type="submit" loading={busy} disabled={!canSubmit}>Submit Payload</Button>
+            <Button type="submit" loading={busy}>Submit Payload</Button>
           </div>
         </form>
 

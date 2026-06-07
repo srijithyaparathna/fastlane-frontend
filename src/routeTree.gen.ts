@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as TrackerRouteImport } from './routes/tracker'
 import { Route as SubmitRouteImport } from './routes/submit'
 import { Route as SetupRouteImport } from './routes/setup'
+import { Route as LoginRouteImport } from './routes/login'
 import { Route as EventsRouteImport } from './routes/events'
 import { Route as BondsRouteImport } from './routes/bonds'
 import { Route as IndexRouteImport } from './routes/index'
@@ -29,6 +30,11 @@ const SubmitRoute = SubmitRouteImport.update({
 const SetupRoute = SetupRouteImport.update({
   id: '/setup',
   path: '/setup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
 const EventsRoute = EventsRouteImport.update({
@@ -51,6 +57,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/bonds': typeof BondsRoute
   '/events': typeof EventsRoute
+  '/login': typeof LoginRoute
   '/setup': typeof SetupRoute
   '/submit': typeof SubmitRoute
   '/tracker': typeof TrackerRoute
@@ -59,6 +66,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/bonds': typeof BondsRoute
   '/events': typeof EventsRoute
+  '/login': typeof LoginRoute
   '/setup': typeof SetupRoute
   '/submit': typeof SubmitRoute
   '/tracker': typeof TrackerRoute
@@ -68,20 +76,29 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/bonds': typeof BondsRoute
   '/events': typeof EventsRoute
+  '/login': typeof LoginRoute
   '/setup': typeof SetupRoute
   '/submit': typeof SubmitRoute
   '/tracker': typeof TrackerRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/bonds' | '/events' | '/setup' | '/submit' | '/tracker'
+  fullPaths:
+    | '/'
+    | '/bonds'
+    | '/events'
+    | '/login'
+    | '/setup'
+    | '/submit'
+    | '/tracker'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/bonds' | '/events' | '/setup' | '/submit' | '/tracker'
+  to: '/' | '/bonds' | '/events' | '/login' | '/setup' | '/submit' | '/tracker'
   id:
     | '__root__'
     | '/'
     | '/bonds'
     | '/events'
+    | '/login'
     | '/setup'
     | '/submit'
     | '/tracker'
@@ -91,6 +108,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   BondsRoute: typeof BondsRoute
   EventsRoute: typeof EventsRoute
+  LoginRoute: typeof LoginRoute
   SetupRoute: typeof SetupRoute
   SubmitRoute: typeof SubmitRoute
   TrackerRoute: typeof TrackerRoute
@@ -117,6 +135,13 @@ declare module '@tanstack/react-router' {
       path: '/setup'
       fullPath: '/setup'
       preLoaderRoute: typeof SetupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/events': {
@@ -147,6 +172,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   BondsRoute: BondsRoute,
   EventsRoute: EventsRoute,
+  LoginRoute: LoginRoute,
   SetupRoute: SetupRoute,
   SubmitRoute: SubmitRoute,
   TrackerRoute: TrackerRoute,

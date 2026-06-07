@@ -1,6 +1,6 @@
 import { ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LayoutDashboard, Settings, Send, Search, ScrollText, Coins, Zap, Wallet, Copy } from "lucide-react";
+import { LayoutDashboard, Settings, Send, Search, ScrollText, Coins, Zap, Wallet, Copy, LogIn, ShieldCheck } from "lucide-react";
 import { useFastLane } from "@/hooks/useFastLane";
 import { NODE_WS, truncate, copy } from "@/lib/fastlane";
 import { toast } from "sonner";
@@ -8,6 +8,7 @@ import { toast } from "sonner";
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/setup", label: "Setup", icon: Settings },
+  { to: "/login", label: "Login", icon: LogIn },
   { to: "/submit", label: "Submit Payload", icon: Send },
   { to: "/tracker", label: "Payload Tracker", icon: Search },
   { to: "/events", label: "Events Log", icon: ScrollText },
@@ -16,7 +17,7 @@ const NAV = [
 
 export function AppLayout({ children }: { children: ReactNode }) {
   const path = useRouterState({ select: (r) => r.location.pathname });
-  const { state, block, accounts, selected, setSelected, connectWallet, extensionConnected } = useFastLane();
+  const { state, block, accounts, selected, setSelected, connectWallet, extensionConnected, loggedIn } = useFastLane();
 
   return (
     <div className="flex min-h-screen bg-background text-foreground">
@@ -78,6 +79,26 @@ export function AppLayout({ children }: { children: ReactNode }) {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Logged-in indicator — links to Login page to switch accounts */}
+            {loggedIn ? (
+              <Link
+                to="/login"
+                className="inline-flex items-center gap-1.5 rounded-md border border-success/40 bg-success/10 px-2.5 py-1.5 text-xs font-medium text-success hover:bg-success/15"
+                title="Logged in — click to switch accounts"
+              >
+                <ShieldCheck className="h-3.5 w-3.5" />
+                {loggedIn.name ?? truncate(loggedIn.address)}
+              </Link>
+            ) : (
+              <Link
+                to="/login"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+                title="Log in with the Polkadot.js extension to submit payloads"
+              >
+                <LogIn className="h-3.5 w-3.5" />
+                Login
+              </Link>
+            )}
             {/* Always show account selector when dev accounts are loaded */}
             {accounts.length > 0 && (
               <>
