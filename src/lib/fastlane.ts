@@ -1,6 +1,6 @@
 import { ApiPromise, WsProvider } from "@polkadot/api";
 
-export const NODE_WS = "ws://localhost:9944";
+export const NODE_WS = "ws://localhost:19944";
 
 let apiPromise: Promise<ApiPromise> | null = null;
 let provider: WsProvider | null = null;
