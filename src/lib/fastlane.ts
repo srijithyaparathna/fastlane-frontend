@@ -1,6 +1,34 @@
 import { ApiPromise, WsProvider } from "@polkadot/api";
 
-export const NODE_WS = "ws://localhost:19944";
+export const NODE_WS = "wss://pre-consensus-attestation-pallet-fastlane.projectfreedom.io/ws";
+
+// FastLane REST API (Swagger-documented) served on the same host under /api.
+export const API_BASE = "https://pre-consensus-attestation-pallet-fastlane.projectfreedom.io/api";
+
+export type NodeStatus = {
+  name: string;
+  address: string;
+  online: boolean;
+  ocwOnline: boolean;
+  syncing: boolean | null;
+  peers: number | null;
+  reason: string;
+};
+
+// Well-known dev-account addresses → friendly names, so authorities render as
+// "Alice" etc. even when the /nodes API is unavailable.
+export const KNOWN_ACCOUNTS: Record<string, string> = {
+  "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY": "Alice",
+  "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty": "Bob",
+  "5FLSigC9HGRKVhB9FiEo4Y3koPsNmBmLJbpXg2mp1hXcS59Y": "Charlie",
+  "5DAAnrj7VHTznn2AWBemMuyBwZWs6FNFjdyVXUeYum3PTXFy": "Dave",
+  "5HGjWAeFDfFCWPsjFQdVV2Msvz2XtMktvgocEZcCj68kUMaw": "Eve",
+  "5CiPPseXPECbkjWCa6MnjNokrgYjMqmKndv2rSnekmSK2DjL": "Ferdie",
+};
+
+export function accountName(address: string): string | undefined {
+  return KNOWN_ACCOUNTS[address];
+}
 
 let apiPromise: Promise<ApiPromise> | null = null;
 let provider: WsProvider | null = null;

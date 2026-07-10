@@ -3,7 +3,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { useFastLane } from "@/hooks/useFastLane";
 import { Card, Field, Input, Button, Address } from "@/components/fastlane/Card";
-import { statusInfo, truncate } from "@/lib/fastlane";
+import { statusInfo, truncate, accountName } from "@/lib/fastlane";
 
 export const Route = createFileRoute("/tracker")({ component: TrackerPage });
 
@@ -33,8 +33,10 @@ function TrackerPage() {
       ]);
       const obj = info?.toJSON?.() ?? null;
       setData(obj);
+      // Attestations is a Vec<SignatureRecord{authority,signature,checksHash}> —
+      // pull out each attester's address (records may also be bare strings).
       const arr = (attsR?.toJSON?.() ?? []) as any[];
-      setAtts(Array.isArray(arr) ? arr.map(String) : []);
+      setAtts(Array.isArray(arr) ? arr.map((r) => (typeof r === "string" ? r : String(r?.authority ?? ""))).filter(Boolean) : []);
       setStatusStr(statusR?.toString?.() ?? (obj?.status ? String(obj.status) : "Submitted"));
       setThreshold(Number(thR?.toString?.() ?? 0));
       setRecent((r) => [target, ...r.filter((x) => x !== target)].slice(0, 5));
@@ -124,12 +126,16 @@ function TrackerPage() {
             </div>
             <div className="max-h-60 space-y-1 overflow-auto rounded-md border border-border bg-background/40 p-2">
               {atts.length === 0 && <p className="px-2 py-2 text-xs text-muted-foreground">Waiting for signatures…</p>}
-              {atts.map((a, i) => (
-                <div key={i} className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent">
-                  <span className="text-muted-foreground">#{i}</span>
-                  <Address value={a} />
-                </div>
-              ))}
+              {atts.map((a, i) => {
+                const name = accountName(a);
+                return (
+                  <div key={i} className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent">
+                    <span className="text-muted-foreground">#{i}</span>
+                    {name && <span className="min-w-[52px] font-semibold">{name}</span>}
+                    <Address value={a} />
+                  </div>
+                );
+              })}
             </div>
           </Card>
         </>

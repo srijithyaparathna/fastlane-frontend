@@ -4,6 +4,15 @@ import { toast } from "sonner";
 import { useFastLane } from "@/hooks/useFastLane";
 import { Card, Field, Input, Button, Address, Select } from "@/components/fastlane/Card";
 import { Plug, PlugZap } from "lucide-react";
+import { accountName } from "@/lib/fastlane";
+
+// How many of the most-recent payloads to inspect when judging OCW liveness.
+// An online worker attests essentially every new payload; an offline one
+// attests none. A window smooths over the occasional miss when a payload
+// finalises (at threshold) before a given worker's attestation lands.
+const RECENT_WINDOW = 10;
+
+type Liveness = { recent: number; window: number; everAttested: number };
 
 export const Route = createFileRoute("/setup")({ component: SetupPage });
 
@@ -30,6 +39,8 @@ function SetupPage() {
   }, []);
   const [authorities, setAuthorities] = useState<string[]>([]);
   const [bonds, setBonds] = useState<Record<string, string>>({});
+  const [liveness, setLiveness] = useState<Record<string, Liveness>>({});
+  const [recentPayloads, setRecentPayloads] = useState<number>(0);
   const [threshold, setThreshold] = useState<string>("—");
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [thrInput, setThrInput] = useState<string>("");
@@ -57,6 +68,53 @@ function SetupPage() {
           }));
           setBonds(Object.fromEntries(entries));
         }
+        // Derive offchain-worker liveness directly from chain storage — no
+        // backend. There is no per-attestation event, so we read the
+        // Attestations map (payloadId -> [{authority}]) plus the Payloads map
+        // (for createdAt) and measure, over the most recent payloads, how many
+        // each authority attested. A live OCW attests ~all of them; a dead one
+        // (registered authority but no node running) attests none.
+        if (p?.attestations?.entries && p?.payloads?.entries) {
+          const [attEntries, payEntries] = await Promise.all([
+            p.attestations.entries(),
+            p.payloads.entries(),
+          ]);
+          if (!active) return;
+
+          // attesters per payloadId
+          const attByPayload = new Map<string, string[]>();
+          const everAttested: Record<string, number> = {};
+          for (const [key, records] of attEntries) {
+            const pid = key.args[0].toString();
+            const auths = (records as any[]).map((r) => r.authority.toString());
+            attByPayload.set(pid, auths);
+            for (const auth of auths) everAttested[auth] = (everAttested[auth] ?? 0) + 1;
+          }
+
+          // most-recent N payloads by createdAt
+          const payloads = payEntries
+            .map(([key, val]: [any, any]) => {
+              const j = val.toJSON?.() ?? {};
+              return { pid: key.args[0].toString(), createdAt: Number(j.createdAt ?? 0) };
+            })
+            .sort((a: any, b: any) => b.createdAt - a.createdAt);
+          const window = payloads.slice(0, RECENT_WINDOW);
+
+          const next: Record<string, Liveness> = {};
+          for (const auth of Object.keys(everAttested)) {
+            next[auth] = { recent: 0, window: window.length, everAttested: everAttested[auth] };
+          }
+          for (const { pid } of window) {
+            for (const auth of attByPayload.get(pid) ?? []) {
+              if (!next[auth]) next[auth] = { recent: 0, window: window.length, everAttested: everAttested[auth] ?? 0 };
+              next[auth].recent += 1;
+            }
+          }
+          if (active) {
+            setLiveness(next);
+            setRecentPayloads(window.length);
+          }
+        }
       } catch (e) { console.error(e); }
     };
     load();
@@ -72,18 +130,36 @@ function SetupPage() {
     });
   };
 
+  // Decode a DispatchError into a readable "pallet.ErrorName" (e.g.
+  // fastlane.ThresholdTooLow) instead of a raw index blob.
+  const decodeErr = (dispatchError: any): string => {
+    try {
+      if (dispatchError?.isModule) {
+        const d = (api as any).registry.findMetaError(dispatchError.asModule);
+        return `${d.section}.${d.name}`;
+      }
+    } catch { /* fall through */ }
+    return dispatchError?.toString?.() ?? "dispatch error";
+  };
+
   const sendTx = (tx: any, signer: Awaited<ReturnType<typeof getSigner>>) =>
     new Promise<void>((resolve, reject) => {
       const cb = (r: any) => {
         if (!r.status.isInBlock) return;
-        const failed = r.events.find(({ event }: any) =>
-          event.section === "system" && event.method === "ExtrinsicFailed"
-        );
-        if (failed) {
-          reject(new Error("Transaction failed on-chain (BadOrigin or module error)"));
-        } else {
-          resolve();
+        for (const { event } of r.events) {
+          // Direct extrinsic failure (e.g. BadOrigin when not signing as sudo).
+          if ((api as any).events.system.ExtrinsicFailed.is(event)) {
+            return reject(new Error(decodeErr(event.data[0])));
+          }
+          // sudo wrapper succeeds even when the inner call errors — the real
+          // result lives in sudo.Sudid. Surface that inner error.
+          const sudid = (api as any).events.sudo?.Sudid;
+          if (sudid?.is(event)) {
+            const result = event.data[0];
+            if (result?.isErr) return reject(new Error(decodeErr(result.asErr)));
+          }
         }
+        resolve();
       };
       const send = signer.type === "keypair"
         ? tx.signAndSend(signer.pair, cb)
@@ -105,8 +181,21 @@ function SetupPage() {
     } finally { setBusyA(false); }
   };
 
+  // set_threshold requires: authorities/2 < value <= authorities  (strictly
+  // more than half, never exceeding the authority count). Mirror that here so
+  // the UI can validate before submitting and explain rejections.
+  const authCount = authorities.length;
+  const thrMin = authCount > 0 ? Math.floor(authCount / 2) + 1 : 1;
+  const thrMax = authCount;
+  const thrNum = Number(thrInput);
+  const thrValid = thrInput !== "" && Number.isInteger(thrNum) && thrNum >= thrMin && thrNum <= thrMax;
+
   const setThr = async () => {
     if (!api || !selected || !thrInput) return;
+    if (!thrValid) {
+      toast.error(`Threshold must be ${thrMin}–${thrMax} for ${authCount} authorities (strictly more than half).`);
+      return;
+    }
     setBusyT(true);
     try {
       const signer = await getSigner(selected);
@@ -114,7 +203,13 @@ function SetupPage() {
       await sendTx(tx, signer);
       toast.success(`Threshold set to ${thrInput}`);
     } catch (e: any) {
-      toast.error(e?.message ?? "Failed — make sure you are signing as the sudo key (Alice)");
+      const msg: string = e?.message ?? "Failed";
+      toast.error(
+        msg.includes("ThresholdTooLow") ? `Too low — must be more than half the authorities (min ${thrMin}).`
+        : msg.includes("ThresholdTooHigh") ? `Too high — cannot exceed the authority count (max ${thrMax}).`
+        : msg.includes("BadOrigin") ? "Rejected — you must sign as the sudo key (Alice)."
+        : msg
+      );
     } finally { setBusyT(false); }
   };
 
@@ -168,18 +263,53 @@ function SetupPage() {
       </Card>
 
       {/* Current state */}
-      <Card title="Current Authorities" subtitle={`Threshold: ${threshold} • Authorities: ${authorities.length}`}>
+      <Card
+        title="Current Authorities"
+        subtitle={`Threshold: ${threshold} • Authorities: ${authorities.length} • OCWs online: ${authorities.filter((a) => (liveness[a]?.recent ?? 0) > 0).length}/${authorities.length}`}
+      >
+        <p className="mb-2 text-[11px] text-muted-foreground">
+          Offchain-worker liveness derived from chain: share of the last {recentPayloads || RECENT_WINDOW} payloads each authority attested.
+        </p>
         <div className="space-y-1.5">
           {authorities.length === 0 && <p className="text-sm text-muted-foreground">No authorities set yet.</p>}
-          {authorities.map((a, i) => (
-            <div key={a} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background/40 px-3 py-2">
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-muted-foreground">#{i}</span>
-                <Address value={a} />
+          {authorities.map((a, i) => {
+            const lv = liveness[a];
+            const recent = lv?.recent ?? 0;
+            const win = lv?.window ?? recentPayloads;
+            // Chain-derived OCW state: green if it attested any recent payload,
+            // amber if it has attested historically but nothing recent (node
+            // likely stopped), red if it has never attested (no node running).
+            let ocw: { cls: string; label: string; title: string };
+            if (recent > 0) {
+              ocw = { cls: "border-success/40 bg-success/15 text-success", label: `● online · ${recent}/${win}`, title: `Attested ${recent} of the last ${win} payloads` };
+            } else if ((lv?.everAttested ?? 0) > 0) {
+              ocw = { cls: "border-warning/40 bg-warning/15 text-warning", label: "◐ idle", title: `Has attested before (${lv?.everAttested}) but none of the last ${win} — node may be down` };
+            } else {
+              ocw = { cls: "border-destructive/40 bg-destructive/15 text-destructive", label: "○ offline", title: "Never attested — no offchain worker running for this authority" };
+            }
+            const name = accountName(a);
+            return (
+              <div key={a} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background/40 px-3 py-2">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-muted-foreground">#{i}</span>
+                  {name && <span className="min-w-[52px] text-sm font-semibold">{name}</span>}
+                  <Address value={a} />
+                </div>
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${ocw.cls}`}
+                    title={ocw.title}
+                  >
+                    {ocw.label}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground" title="Total payloads this authority has ever attested">
+                    {(lv?.everAttested ?? 0) > 0 ? `attested ${lv?.everAttested}` : "—"}
+                  </span>
+                  <span className="font-mono text-xs text-muted-foreground">bond: {bonds[a] ?? "—"}</span>
+                </div>
               </div>
-              <span className="font-mono text-xs text-muted-foreground">bond: {bonds[a] ?? "—"}</span>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </Card>
 
@@ -211,17 +341,27 @@ function SetupPage() {
 
         {/* Set Threshold */}
         <Card title="Set Threshold" subtitle="sudo → fastlane.setThreshold(value)">
-          <Field label="Threshold value" hint="How many signatures are needed to reach PreConsensed">
+          <Field
+            label="Threshold value"
+            hint={`Signatures needed to reach PreConsensed. Valid: ${thrMin}–${thrMax} for ${authCount} authorities (must be more than half).`}
+          >
             <Input
               type="number"
-              min={1}
+              min={thrMin}
+              max={thrMax}
               value={thrInput}
               onChange={(e) => setThrInput(e.target.value)}
-              placeholder="e.g. 2"
+              placeholder={`e.g. ${thrMin}`}
             />
           </Field>
-          <div className="mt-3 flex justify-end">
-            <Button onClick={setThr} loading={busyT} disabled={!thrInput || !selected}>
+          {thrInput !== "" && !thrValid && (
+            <p className="mt-1.5 text-[11px] text-destructive">
+              Must be between {thrMin} and {thrMax} (strictly more than half of {authCount} authorities).
+            </p>
+          )}
+          <div className="mt-3 flex items-center justify-between">
+            <span className="text-[11px] text-muted-foreground">Current: {threshold}</span>
+            <Button onClick={setThr} loading={busyT} disabled={!thrValid || !selected}>
               Set Threshold
             </Button>
           </div>
