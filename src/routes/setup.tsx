@@ -69,15 +69,24 @@ function SetupPage() {
           setBonds(Object.fromEntries(entries));
         }
         // Derive offchain-worker liveness directly from chain storage — no
-        // backend. There is no per-attestation event, so we read the
-        // Attestations map (payloadId -> [{authority}]) plus the Payloads map
-        // (for createdAt) and measure, over the most recent payloads, how many
-        // each authority attested. A live OCW attests ~all of them; a dead one
-        // (registered authority but no node running) attests none.
+        // backend. There is no per-attestation event, so we measure, over the
+        // most recent payloads, how many each authority attested. A live OCW
+        // attests ~all of them; a dead one (registered authority but no node
+        // running) attests none.
+        //
+        // Two sources are needed, because `prune_finalised_storage` DELETES the
+        // Attestations map the moment a payload finalises. Reading Attestations
+        // alone makes every authority look idle within seconds of a healthy
+        // payload completing — the recent window is almost entirely finalised
+        // payloads, all of which have had their per-signature records dropped.
+        // AggregatedAttestations survives finalisation, so it is the source of
+        // truth for anything already settled; Attestations still gives the
+        // live in-flight signal before the aggregate is written.
         if (p?.attestations?.entries && p?.payloads?.entries) {
-          const [attEntries, payEntries] = await Promise.all([
+          const [attEntries, payEntries, aggEntries] = await Promise.all([
             p.attestations.entries(),
             p.payloads.entries(),
+            p.aggregatedAttestations?.entries?.() ?? Promise.resolve([]),
           ]);
           if (!active) return;
 
@@ -89,6 +98,20 @@ function SetupPage() {
             const auths = (records as any[]).map((r) => r.authority.toString());
             attByPayload.set(pid, auths);
             for (const auth of auths) everAttested[auth] = (everAttested[auth] ?? 0) + 1;
+          }
+
+          // Recover signers of finalised payloads from the aggregate bitmap
+          // (bit i set <=> list[i] signed). Only fills gaps — a live
+          // Attestations record for the same payload always wins.
+          for (const [key, val] of aggEntries as any[]) {
+            const pid = key.args[0].toString();
+            if (attByPayload.has(pid)) continue;
+            const agg = val?.unwrapOr?.(null) ?? val;
+            if (!agg?.signerBitmap) continue;
+            const bitmap = BigInt(agg.signerBitmap.toString());
+            const signers = list.filter((_, i) => (bitmap >> BigInt(i)) & 1n);
+            attByPayload.set(pid, signers);
+            for (const auth of signers) everAttested[auth] = (everAttested[auth] ?? 0) + 1;
           }
 
           // most-recent N payloads by createdAt

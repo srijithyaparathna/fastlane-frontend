@@ -28,9 +28,11 @@ const DEV_SEEDS = [
 
 const EVENT_DESC: Record<string, string> = {
   Submitted:          "A new payload was registered on-chain",
-  PreConsensed:       "Threshold signatures collected — fast-lane approved",
-  Finalised:          "Confirmed in a canonical block by finalize",
-  Finalized:          "Confirmed in a canonical block by finalize",
+  // Not "canonical" / "final": these are pallet state transitions. Chain
+  // finality is GRANDPA's job and runs on its own clock (spec §1).
+  PreConsensed:       "Threshold signatures collected — approved, still reversible",
+  Finalised:          "FastLane settlement applied — not chain finality",
+  Finalized:          "FastLane settlement applied — not chain finality",
   Expired:            "Payload expired without reaching consensus",
   AuthoritiesUpdated: "Authority set was replaced by governance",
   ThresholdUpdated:   "Signature threshold was updated by governance",
