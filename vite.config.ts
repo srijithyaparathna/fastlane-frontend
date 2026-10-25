@@ -6,4 +6,12 @@
 // You can pass additional config via defineConfig({ vite: { ... } }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
-export default defineConfig();
+// Served in production behind nginx, which proxies the public domain to this
+// dev server — Vite's default host check would otherwise 403 that Host header.
+export default defineConfig({
+  vite: {
+    server: {
+      allowedHosts: ["pre-consensus-attestation-pallet-fastlane.projectfreedom.io"],
+    },
+  },
+});
